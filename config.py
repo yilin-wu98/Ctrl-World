@@ -108,6 +108,13 @@ class wm_args:
             self.instruction = ['pick up the green block and place in plate', 'pick up the green block and place in plate', 'pick up the blue block and place in plate']
             self.task_name = "Rollouts_replay_text"
 
+        elif self.task_type == 'replay_val_videos':
+            self.val_dataset_dir = "/home/yilin/Projects/SAILOR-FM/datasets/Eval/preprocessed"
+            self.val_id = ['0', '7', '18' '22', '33', '38', '42', '51', '56', '63', '75']
+            self.start_idx = [0] * len(self.val_id)
+            self.instruction = [""] * len(self.val_id)
+            self.task_name = "Rollouts_replay_val_videos"
+
         elif self.task_type == "replay":
             self.val_dataset_dir = "/home/yilin/Projects/SAILOR-FM/datasets/preprocessed_test" #"dataset_example/droid_subset"
             self.val_id =['253', '2539', "25400", "25401", "25402", "25403"]
