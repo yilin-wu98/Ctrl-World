@@ -78,9 +78,9 @@ class wm_args:
     ##############################################################################
     policy_type = 'pi05' # choose from ['pi05', 'pi0', 'pi0fast']
     action_adapter = 'models/action_adapter/model2_15_9.pth' # adapat action from joint vel to cartesian pose
-    pred_step = 5 # predict 5 steps (1s) action each time
+    pred_step = 5#5 # predict 5 steps (1s) action each time
     policy_skip_step = 2 # horizon = (pred_step-1) * policy_skip_step
-    interact_num = 12 # number of interactions (each interaction contains pred_step steps)
+    interact_num = 13 # number of interactions (each interaction contains pred_step steps)
 
     # wm
     data_stat_path = 'dataset_meta_info/droid/stat.json'
@@ -101,12 +101,19 @@ class wm_args:
             self.task_name = "Rollouts_replay"
 
         # Configure per-task eval sets
-        if self.task_type == "replay":
-            self.val_dataset_dir = "dataset_example/droid_subset"
-            self.val_id = ["899", "18599","199",]
-            self.start_idx = [8, 14, 8] * len(self.val_id)
+        if self.task_type == 'replay_text':
+            self.val_dataset_dir = 'dataset_example/droid_new_setup'
+            self.val_id = ['0001','0002','0003']
+            self.start_idx = [0] * len(self.val_id)
+            self.instruction = ['pick up the green block and place in plate', 'pick up the green block and place in plate', 'pick up the blue block and place in plate']
+            self.task_name = "Rollouts_replay_text"
+
+        elif self.task_type == "replay":
+            self.val_dataset_dir = "/home/yilin/Projects/SAILOR-FM/datasets/preprocessed_test" #"dataset_example/droid_subset"
+            self.val_id =['253', '2539', "25400", "25401", "25402", "25403"]
+            self.start_idx = [0] * len(self.val_id)
             self.instruction = [""] * len(self.val_id)
-            self.task_name = "Rollouts_replay"
+            self.task_name = "Rollouts_replay_preprocessed"
 
         elif self.task_type == "keyboard":
             self.val_dataset_dir = "dataset_example/droid_subset"
@@ -114,6 +121,7 @@ class wm_args:
             self.start_idx = [23] * len(self.val_id)
             self.instruction = [""] * len(self.val_id)
             self.task_name = "Rollouts_keyboard"
+            self.policy_skip_step = 3
 
         # elif self.task_type == "keyboard2":
         #     self.val_dataset_dir = "/cephfs/shared/droid_hf/droid_svd_v2"

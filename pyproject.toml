@@ -1,0 +1,32 @@
+[project]
+name = "ctrl-world"
+version = "0.1.0"
+description = "Ctrl-World: A Controllable Generative World Model for Robot Manipulation"
+readme = "readme.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "diffusers>=0.34.0",
+    "transformers>=4.48.1",
+    "torch>=2.7.1",
+    "mediapy",
+    "wandb",
+    "swanlab",
+    "accelerate",
+    "tqdm",
+    "numpy",
+    "decord",
+    "einops",
+    "scipy",
+    "pandas",
+    "safetensors",
+    "imageio",
+    "torchvision",
+    "typing-extensions",
+    "omegaconf",
+    "Pillow",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]

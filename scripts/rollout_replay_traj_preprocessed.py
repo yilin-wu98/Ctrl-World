@@ -87,9 +87,10 @@ class agent():
         val_dataset_dir = self.args.val_dataset_dir
         args = self.args
         skip = args.skip_step
+        
         num_frames = steps
-        # annotation_path = f"{val_dataset_dir}/annotations/train/{id}.json"
-        annotation_path = f"{val_dataset_dir}/annotation/val/{id}.json"
+        annotation_path = f"{val_dataset_dir}/annotations/train/{id}.json"
+        # annotation_path = f"{val_dataset_dir}/annotation/val/{id}.json"
 
         with open(annotation_path) as f:
             anno = json.load(f)
@@ -97,6 +98,7 @@ class agent():
                 length = len(anno['action'])
             except:
                 length = anno["video_length"]
+            
         frames_ids = np.arange(start_idx, start_idx + num_frames * skip, skip)
         max_ids = np.ones_like(frames_ids) * (length - 1)
         frames_ids = np.min([frames_ids, max_ids], axis=0).astype(int)
@@ -105,107 +107,78 @@ class agent():
         # get action and joint pos
         instruction = anno['texts'][0]
         car_action = np.array(anno['states'])
-        ## make the last dim action always the 0
-        car_action[:,-1] = car_action[0,-1]
-        # car_action = car_action[np.random.permutation(len(car_action))]
-        car_action = car_action[frames_ids]
-        # joint_pos = np.array(anno['observation.state.joint_position']) #np.array(anno['joints'])
-        # gripper_pos = np.array(anno['observation.state.gripper_position'])
-        # joint_pos = np.concatenate([joint_pos, gripper_pos[:,None]], axis=-1)
-        joint_pos = np.array(anno['joints'])
-        ## shuffle the joint pos 
-        # joint_pos = joint_pos[np.random.permutation(len(joint_pos))]
         # breakpoint()
+        
+        car_action = car_action[frames_ids]
+        joint_pos = np.array(anno['observation.state.joint_position']) #np.array(anno['joints'])
+        gripper_pos = np.array(anno['observation.state.gripper_position'])
+        joint_pos = np.concatenate([joint_pos, gripper_pos[:,None]], axis=-1)
+        # joint_pos = np.array(anno['joints'])
         joint_pos = joint_pos[frames_ids]
 
         # get videos
         video_dict = []
         video_latent = []
         num_views = 3  # expected number of camera views
-        for id in range(len(anno['videos'])):
-            video_path = anno['videos'][id]['video_path']
+        
+        if True:
+            # Single concatenated video: load once and split into views (stacked vertically)
+            # video_path = anno['video_path']
+            video_path = anno['video_path']
             video_path = f"{val_dataset_dir}/{video_path}"
-            # load videos from all views
             vr = VideoReader(video_path, ctx=cpu(0), num_threads=2)
             try:
-                true_video = vr.get_batch(range(length)).asnumpy()
+                concat_video = vr.get_batch(range(length)).asnumpy()
             except:
-                true_video = vr.get_batch(range(length)).numpy()
-            true_video = true_video[frames_ids]
-            video_dict.append(true_video)
-          # encode video
-            device = self.device
-            true_video = torch.from_numpy(true_video).to(self.dtype).to(device)
-            x = true_video.permute(0,3,1,2).to(device) / 255.0*2-1
-            vae = self.model.pipeline.vae
-            with torch.no_grad():
-                batch_size = 32
-                latents = []
-                for i in range(0, len(x), batch_size):
-                    batch = x[i:i+batch_size]
-                    latent = vae.encode(batch).latent_dist.sample().mul_(vae.config.scaling_factor)
-                    latents.append(latent)
-                x = torch.cat(latents, dim=0)
-    
-            video_latent.append(x)
-        #  if True:
-        #     # Single concatenated video: load once and split into views (stacked vertically)
-        #     # video_path = anno['video_path']
-        #     video_path = anno['video_path']
-        #     video_path = f"{val_dataset_dir}/{video_path}"
-        #     vr = VideoReader(video_path, ctx=cpu(0), num_threads=2)
-        #     try:
-        #         concat_video = vr.get_batch(range(length)).asnumpy()
-        #     except:
-        #         concat_video = vr.get_batch(range(length)).numpy()
-        #     concat_video = concat_video[frames_ids]  # (num_frames, H*3, W, 3)
-        #     # breakpoint()
-        #     w_per_view = concat_video.shape[2] // num_views
-        #     for view_id in range(num_views):
-        #         start_w = view_id * w_per_view
-        #         end_w = (view_id + 1) * w_per_view
-        #         true_video = concat_video[:, :, start_w:end_w, :]  # (num_frames, H, W, 3)
-        #         video_dict.append(true_video)
+                concat_video = vr.get_batch(range(length)).numpy()
+            concat_video = concat_video[frames_ids]  # (num_frames, H*3, W, 3)
+            # breakpoint()
+            w_per_view = concat_video.shape[2] // num_views
+            for view_id in range(num_views):
+                start_w = view_id * w_per_view
+                end_w = (view_id + 1) * w_per_view
+                true_video = concat_video[:, :, start_w:end_w, :]  # (num_frames, H, W, 3)
+                video_dict.append(true_video)
 
-        #         # encode video
-        #         device = self.device
-        #         true_video_t = torch.from_numpy(true_video).to(self.dtype).to(device)
-        #         x = true_video_t.permute(0, 3, 1, 2).to(device) / 255.0 * 2 - 1
-        #         vae = self.model.pipeline.vae
-        #         with torch.no_grad():
-        #             batch_size = 32
-        #             latents = []
-        #             for i in range(0, len(x), batch_size):
-        #                 batch = x[i:i + batch_size]
-        #                 latent = vae.encode(batch).latent_dist.sample().mul_(vae.config.scaling_factor)
-        #                 latents.append(latent)
-        #             video_latent.append(torch.cat(latents, dim=0))
-        # else:
-        #     # Multiple separate video files (original format)
-        #     for vid_id in range(len(anno['videos'])):
-        #         video_path = anno['videos'][vid_id]['video_path']
-        #         video_path = f"{val_dataset_dir}/{video_path}"
-        #         vr = VideoReader(video_path, ctx=cpu(0), num_threads=2)
-        #         try:
-        #             true_video = vr.get_batch(range(length)).asnumpy()
-        #         except:
-        #             true_video = vr.get_batch(range(length)).numpy()
-        #         true_video = true_video[frames_ids]
-        #         video_dict.append(true_video)
+                # encode video
+                device = self.device
+                true_video_t = torch.from_numpy(true_video).to(self.dtype).to(device)
+                x = true_video_t.permute(0, 3, 1, 2).to(device) / 255.0 * 2 - 1
+                vae = self.model.pipeline.vae
+                with torch.no_grad():
+                    batch_size = 32
+                    latents = []
+                    for i in range(0, len(x), batch_size):
+                        batch = x[i:i + batch_size]
+                        latent = vae.encode(batch).latent_dist.sample().mul_(vae.config.scaling_factor)
+                        latents.append(latent)
+                    video_latent.append(torch.cat(latents, dim=0))
+        else:
+            # Multiple separate video files (original format)
+            for vid_id in range(len(anno['videos'])):
+                video_path = anno['videos'][vid_id]['video_path']
+                video_path = f"{val_dataset_dir}/{video_path}"
+                vr = VideoReader(video_path, ctx=cpu(0), num_threads=2)
+                try:
+                    true_video = vr.get_batch(range(length)).asnumpy()
+                except:
+                    true_video = vr.get_batch(range(length)).numpy()
+                true_video = true_video[frames_ids]
+                video_dict.append(true_video)
 
-                # # encode video
-                # device = self.device
-                # true_video_t = torch.from_numpy(true_video).to(self.dtype).to(device)
-                # x = true_video_t.permute(0, 3, 1, 2).to(device) / 255.0 * 2 - 1
-                # vae = self.model.pipeline.vae
-                # with torch.no_grad():
-                #     batch_size = 32
-                #     latents = []
-                #     for i in range(0, len(x), batch_size):
-                #         batch = x[i:i + batch_size]
-                #         latent = vae.encode(batch).latent_dist.sample().mul_(vae.config.scaling_factor)
-                #         latents.append(latent)
-                #     video_latent.append(torch.cat(latents, dim=0))
+                # encode video
+                device = self.device
+                true_video_t = torch.from_numpy(true_video).to(self.dtype).to(device)
+                x = true_video_t.permute(0, 3, 1, 2).to(device) / 255.0 * 2 - 1
+                vae = self.model.pipeline.vae
+                with torch.no_grad():
+                    batch_size = 32
+                    latents = []
+                    for i in range(0, len(x), batch_size):
+                        batch = x[i:i + batch_size]
+                        latent = vae.encode(batch).latent_dist.sample().mul_(vae.config.scaling_factor)
+                        latents.append(latent)
+                    video_latent.append(torch.cat(latents, dim=0))
 
         
         return car_action, joint_pos, video_dict, video_latent, instruction
@@ -281,6 +254,7 @@ class agent():
         videos = videos.detach().to(torch.float32).cpu().numpy().transpose(0,1,3,4,2).astype(np.uint8)
 
         # concatenate true videos and video
+       
         videos_cat = np.concatenate([true_video,videos],axis=-3) # (3, 8, 256, 256, 3)
         videos_cat = np.concatenate([video for video in videos_cat],axis=-2).astype(np.uint8) 
 
@@ -328,7 +302,7 @@ if __name__ == "__main__":
        
         for text_iter in range(args.text_iters):
             # text_i = instructions[text_iter]
-            # text_i = ''
+            # text_i = 'grasp the marker'
 
             print("text_i:",text_i, "eef pose at t=0", eef_gt[0], "joint at t=0", joint_pos_gt[0])
 
@@ -396,12 +370,15 @@ if __name__ == "__main__":
             
             # save rollout video and info with parameters
             video = np.concatenate(video_to_save, axis=0)
+            ## only save the 2:49
+            video = video[2:49]
+
             task_name = args.task_name
             text_id = text_i.replace(' ', '_').replace(',', '').replace('.', '').replace('\'', '').replace('\"', '')[:30]
             videos_dir = args.val_model_path.split('/')[:-1]
             videos_dir = '/'.join(videos_dir)
             uuid = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename_video = f"{args.save_dir}/{task_name}/video/time_{uuid}_traj_{val_id_i}_{start_idx_i}_{pred_step}_{text_id}_wrong_joint.mp4"
+            filename_video = f"{args.save_dir}/{task_name}/video/time_{uuid}_traj_{val_id_i}_{start_idx_i}_{pred_step}_{text_id}.mp4"
             os.makedirs(os.path.dirname(filename_video), exist_ok=True)
             mediapy.write_video(filename_video, video, fps=4)
             print(f"Saving video to {filename_video}")

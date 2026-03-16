@@ -1,0 +1,1 @@
+python scripts/rollout_replay_traj.py --svd_model_path /data/yilin/ctrl-world/models/svd_model_ckpt --clip_model_path /data/yilin/ctrl-world/models/clip_model_ckpt --ckpt_path /data/yilin/ctrl-world/models/ctrl_world_ckpt/checkpoint-10000.pt --task_type replay_text

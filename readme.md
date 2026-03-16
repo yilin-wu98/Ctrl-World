@@ -37,14 +37,32 @@ This repo includes the official PyTorch implementation for ICLR 2026 [**Ctrl-Wor
 
 ## Installation 🛠️
 
+### Option A: uv (recommended)
+
+```bash
+# Install uv if needed: curl -LsSf https://astral.sh/uv/install.sh | sh
+cd Ctrl-World
+uv sync
+```
+
+Then run scripts with:
+```bash
+uv run python scripts/rollout_replay_traj.py ...
+```
+
+### Option B: conda + pip
 
 ```bash
 conda create -n ctrl-world python==3.11
 conda activate ctrl-world
 pip install -r requirements.txt
+```
 
-#  If you want to use ctrl-world to interact with $\pi_{0.5}$ model, following the pi official repo to install the pi model dependencies. Otherwise you can skip it.
-# (from https://github.com/Physical-Intelligence/openpi/tree/main)
+### Optional: $\pi_{0.5}$ model for interaction
+
+If you want to use ctrl-world to interact with $\pi_{0.5}$ model, follow the [openpi official repo](https://github.com/Physical-Intelligence/openpi/tree/main):
+
+```bash
 git clone --recurse-submodules git@github.com:Physical-Intelligence/openpi.git
 cd openpi
 pip install uv
