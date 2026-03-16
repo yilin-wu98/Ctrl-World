@@ -111,9 +111,16 @@ class wm_args:
         elif self.task_type == "replay":
             self.val_dataset_dir = "/home/yilin/Projects/SAILOR-FM/datasets/preprocessed_test" #"dataset_example/droid_subset"
             self.val_id =['253', '2539', "25400", "25401", "25402", "25403"]
-            self.start_idx = [0] * len(self.val_id)
+            self.start_idx = [2] * len(self.val_id)
             self.instruction = [""] * len(self.val_id)
             self.task_name = "Rollouts_replay_preprocessed"
+        
+        elif self.task_type == "replay_eval":
+            self.val_dataset_dir = "/home/yilin/Projects/SAILOR-FM/datasets/Eval/preprocessed" #"dataset_example/droid_subset"
+            self.val_id =['56', '57','58','59','60','61']#['0', '7', '18' '22', '33', '38', '42', '51', '56', '63', '75']
+            self.start_idx = [0] * len(self.val_id)
+            self.instruction = [""] * len(self.val_id)
+            self.task_name = "Rollouts_replay_preprocessed_eval"
 
         elif self.task_type == "keyboard":
             self.val_dataset_dir = "dataset_example/droid_subset"

@@ -14,7 +14,7 @@ from models.pipeline_stable_video_diffusion import StableVideoDiffusionPipeline
 from models.pipeline_ctrl_world import CtrlWorldDiffusionPipeline
 from models.ctrl_world import CrtlWorld
 from models.utils import key_board_control, get_fk_solution
-
+import math
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -83,13 +83,13 @@ class agent():
         ndata = 2 * (data - data_min) / (data_max - data_min + eps) - 1
         return np.clip(ndata, clip_min, clip_max)
 
-    def get_traj_info(self, id, start_idx=0, steps=8):
+    def get_traj_info(self, id, start_idx=0, steps=8, split='train', pred_step = 1):
         val_dataset_dir = self.args.val_dataset_dir
         args = self.args
         skip = args.skip_step
         
         num_frames = steps
-        annotation_path = f"{val_dataset_dir}/annotations/train/{id}.json"
+        annotation_path = f"{val_dataset_dir}/annotations/{split}/{id}.json"
         # annotation_path = f"{val_dataset_dir}/annotation/val/{id}.json"
 
         with open(annotation_path) as f:
@@ -97,9 +97,16 @@ class agent():
             try:
                 length = len(anno['action'])
             except:
-                length = anno["video_length"]
+                length = anno["state_length"]
             
         frames_ids = np.arange(start_idx, start_idx + num_frames * skip, skip)
+        ## figure out what is the minimum number of interaction num to reach the end of the trajectory
+        ## get the ceiling of the division
+        
+        cut_interaction_num = math.ceil((length - start_idx) / ( (pred_step-1)* skip))
+        frames_ids = np.arange(start_idx, start_idx + (cut_interaction_num* pred_step + 8)* skip,  skip)
+        
+        print("cut_interaction_num", cut_interaction_num)
         max_ids = np.ones_like(frames_ids) * (length - 1)
         frames_ids = np.min([frames_ids, max_ids], axis=0).astype(int)
         print("Ground truth frames ids", frames_ids)
@@ -112,7 +119,9 @@ class agent():
         car_action = car_action[frames_ids]
         joint_pos = np.array(anno['observation.state.joint_position']) #np.array(anno['joints'])
         gripper_pos = np.array(anno['observation.state.gripper_position'])
-        joint_pos = np.concatenate([joint_pos, gripper_pos[:,None]], axis=-1)
+        if len(gripper_pos.shape) == 1:
+            gripper_pos = gripper_pos[:,None]
+        joint_pos = np.concatenate([joint_pos, gripper_pos], axis=-1)
         # joint_pos = np.array(anno['joints'])
         joint_pos = joint_pos[frames_ids]
 
@@ -181,7 +190,7 @@ class agent():
                     video_latent.append(torch.cat(latents, dim=0))
 
         
-        return car_action, joint_pos, video_dict, video_latent, instruction
+        return car_action, joint_pos, video_dict, video_latent, instruction, cut_interaction_num, length
 
     def forward_wm(self, action_cond, video_latent_true, video_latent_cond, his_cond=None, text=None):
         args = self.args
@@ -273,6 +282,7 @@ if __name__ == "__main__":
     parser.add_argument('--dataset_names', type=str, default=None)
     parser.add_argument('--task_type', type=str, default='replay')
     parser.add_argument('--text_iters', type=int, default=1)
+    parser.add_argument('--split', type=str, default='train')
     args_new = parser.parse_args()
 
     args = wm_args(task_type=args_new.task_type)
@@ -284,7 +294,7 @@ if __name__ == "__main__":
         return args
     
     args = merge_args(args, args_new)
-    instructions = ['pick up the green block and place in plate', 'pick up the yellow tape and place in plate', 'pick up the blue block and place in plate', 'pick up the red tape and place in plate']
+    # instructions = ['pick up the green block and place in plate', 'pick up the yellow tape and place in plate', 'pick up the blue block and place in plate', 'pick up the red tape and place in plate']
 
     # create rollout agent
     Agent = agent(args)
@@ -296,8 +306,10 @@ if __name__ == "__main__":
 
 
     for val_id_i, text_i, start_idx_i in zip(args.val_id, args.instruction, args.start_idx):
+        if val_id_i == '0':
+            continue
         # read ground truth trajectory informations
-        eef_gt, joint_pos_gt, video_dict, video_latents, instruction = Agent.get_traj_info(val_id_i, start_idx=start_idx_i, steps=int(pred_step*interact_num+8))
+        eef_gt, joint_pos_gt, video_dict, video_latents, instruction, cut_interaction_num, trajectory_length = Agent.get_traj_info(val_id_i, start_idx=start_idx_i, steps=int(pred_step*interact_num+8), split=args.split, pred_step=pred_step)
         text_i = instruction
        
         for text_iter in range(args.text_iters):
@@ -321,7 +333,7 @@ if __name__ == "__main__":
                 his_eef.append(eef_gt[0:1])  # (1, 7)
 
             # interact loop
-            for i in range(interact_num):
+            for i in range(cut_interaction_num):
                 # ground truth video
                 start_id = int(i*(pred_step-1))
                 end_id = start_id + pred_step
@@ -345,7 +357,7 @@ if __name__ == "__main__":
                 print("cartesian space action", cartesian_pose[-1]) # output xyz and gripper for debug
                 
                 print("################ world model forward ################")
-                print(f'traj_id:{val_id_i}, interact step: {i}/{interact_num}')
+                print(f'traj_id:{val_id_i}, interact step: {i}/{cut_interaction_num}')
                 # retrive history cond and action cond
                 history_idx = [0,0,-8,-6,-4,-2]
                 his_pose = np.concatenate([his_eef[idx] for idx in history_idx], axis=0)  # (4, 7)
@@ -371,7 +383,9 @@ if __name__ == "__main__":
             # save rollout video and info with parameters
             video = np.concatenate(video_to_save, axis=0)
             ## only save the 2:49
-            video = video[2:49]
+            # video = video[2:]
+            ## cut the video to the length of the trajectory
+            video = video[:trajectory_length]
 
             task_name = args.task_name
             text_id = text_i.replace(' ', '_').replace(',', '').replace('.', '').replace('\'', '').replace('\"', '')[:30]
