@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 import einops
-from accelerate import Accelerator
+#from accelerate import Accelerator
 import datetime
 import os
 from accelerate.logging import get_logger
@@ -28,7 +28,7 @@ from tqdm.auto import tqdm
 import wandb
 import json
 from decord import VideoReader, cpu
-import swanlab
+#import swanlab
 import mediapy
 import sys
 from scipy.spatial.transform import Rotation as R
@@ -310,10 +310,23 @@ if __name__ == "__main__":
     ## set the valdataset_dir 
     Agent.args.val_dataset_dir = f"{args.val_dataset_dir}"
     ## count how many files in the val_dataset_dir
-    num_files = len(os.listdir(f"{args.val_dataset_dir}/annotations/val"))
+    #num_files = len(os.listdir(f"{args.val_dataset_dir}/annotations/val"))
+    import json
+    with open('missing_file.json', 'r') as f:
+        files = json.load(f)
+    chunk_size = len(files)//args.val_chunk
+    chunk_files = files[chunk_size * args.val_chunk_id:chunk_size *(args.val_chunk_id+1)]
+    val_ids = []
+    for val_id_i in chunk_files:
+        if os.path.exists(f"{args.save_dir}/{val_id_i}.mp4"):
+            continue
+        else:
+            val_ids.append(val_id_i)
+    print(f"rollout {len(val_ids)} files")
+    print(f"val_ids: {val_ids}")
     ## val ids are the ids of the files defined by the number of chunks and chunk id
-    chunk_size = num_files // args.val_chunk
-    val_ids = [i for i in range(args.val_chunk_id * chunk_size, (args.val_chunk_id + 1) * chunk_size)]
+    #chunk_size = num_files // args.val_chunk
+    #val_ids = [i for i in range(args.val_chunk_id * chunk_size, (args.val_chunk_id + 1) * chunk_size)]
     instruction = [""] * len(val_ids)
     start_idx_list = [args.start_idx] * len(val_ids)
 
@@ -404,6 +417,7 @@ if __name__ == "__main__":
             # videos_dir = args.val_model_path.split('/')[:-1]
             # videos_dir = '/'.join(videos_dir)
             # uuid = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            args.save_dir = '/scratch/jarnav/SAILOR/DROID/ctrl-world-pred'
             filename_video = f"{args.save_dir}/{val_id_i}.mp4"
             os.makedirs(os.path.dirname(filename_video), exist_ok=True)
             mediapy.write_video(filename_video, video, fps=4)
