@@ -20,12 +20,14 @@ import argparse
 import gc
 import json
 import os
+import tempfile
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import einops
+from PIL import Image
 from scipy import linalg
 from tqdm import tqdm
 
@@ -129,33 +131,42 @@ def _sliding_window_clips(videos, window_size=15, stride=8):
     return torch.cat(clips, dim=0)
 
 
-@torch.no_grad()
+def _save_frames_to_dir(images, dirpath):
+    """Save (N, C, H, W) float [0,1] tensor as PNG files."""
+    os.makedirs(dirpath, exist_ok=True)
+    for i in range(len(images)):
+        img = (images[i].permute(1, 2, 0).clamp(0, 1) * 255).byte().numpy()
+        Image.fromarray(img).save(os.path.join(dirpath, f"{i:06d}.png"))
+
+
 def compute_fid(real_images, fake_images, batch_size=16, device='cuda'):
-    """FID on individual frames using InceptionV3 features."""
-    if real_images.ndim == 5:
-        real_images = einops.rearrange(real_images, 'b t c h w -> (b t) c h w')
-    if fake_images.ndim == 5:
-        fake_images = einops.rearrange(fake_images, 'b t c h w -> (b t) c h w')
+    """Per-video FID using pytorch-fid, averaged across videos.
 
-    feature_extractor = InceptionV3Features().to(device).eval()
+    Expects (B, T, C, H, W) input. Computes FID per video, returns mean.
+    """
+    from pytorch_fid import fid_score
 
-    print(" Here ", real_images.shape)
-    def extract_features(images):
-        features = []
-        for i in range(0, len(images), batch_size):
-            batch = images[i:i + batch_size].to(device)
-            features.append(feature_extractor(batch).cpu().numpy())
-        return np.concatenate(features, axis=0)
+    assert real_images.ndim == 5 and fake_images.ndim == 5, \
+        "Expected 5D (B, T, C, H, W) tensors for per-video FID"
 
-    real_features = extract_features(real_images)
-    fake_features = extract_features(fake_images)
-    mu_r, sigma_r = compute_statistics(real_features)
-    mu_f, sigma_f = compute_statistics(fake_features)
-    fid = calculate_frechet_distance(mu_r, sigma_r, mu_f, sigma_f)
-
-    feature_extractor.cpu()
+    B = real_images.shape[0]
+    fid_scores = []
+    for b in range(B):
+        with tempfile.TemporaryDirectory() as real_dir, tempfile.TemporaryDirectory() as fake_dir:
+            _save_frames_to_dir(real_images[b], real_dir)
+            _save_frames_to_dir(fake_images[b], fake_dir)
+            fid = fid_score.calculate_fid_given_paths(
+                [real_dir, fake_dir],
+                batch_size=batch_size,
+                device=device,
+                dims=2048,
+            )
+        fid_scores.append(fid)
     torch.cuda.empty_cache()
-    return fid
+    mean_fid = float(np.mean(fid_scores))
+    std_fid = float(np.std(fid_scores))
+    print(f"  Per-video FID: {mean_fid:.2f} ± {std_fid:.2f}")
+    return mean_fid
 
 
 @torch.no_grad()
@@ -193,24 +204,32 @@ def compute_fvd(real_videos, fake_videos, batch_size=16, device='cuda',
 
 @torch.no_grad()
 def compute_lpips(real_images, fake_images, batch_size=256, device='cuda'):
-    """Paired per-frame LPIPS using VGG."""
+    """Per-video LPIPS using VGG, averaged across videos.
+
+    Expects (B, T, C, H, W) input. Averages LPIPS per video, then across videos.
+    """
     import lpips
     lpips_fn = lpips.LPIPS(net='vgg').to(device).eval()
 
-    if real_images.ndim == 5:
-        real_images = real_images.reshape(-1, *real_images.shape[2:])
-    if fake_images.ndim == 5:
-        fake_images = fake_images.reshape(-1, *fake_images.shape[2:])
+    assert real_images.ndim == 5 and fake_images.ndim == 5, \
+        "Expected 5D (B, T, C, H, W) tensors for per-video LPIPS"
 
-    scores = []
-    for i in range(0, len(real_images), batch_size):
-        r = real_images[i:i + batch_size].to(device) * 2 - 1
-        f = fake_images[i:i + batch_size].to(device) * 2 - 1
-        scores.append(lpips_fn(r, f).mean().cpu())
+    B, T = real_images.shape[:2]
+    per_video_scores = []
+    for b in range(B):
+        frame_scores = []
+        for i in range(0, T, batch_size):
+            r = real_images[b, i:i + batch_size].to(device) * 2 - 1
+            f = fake_images[b, i:i + batch_size].to(device) * 2 - 1
+            frame_scores.append(lpips_fn(r, f).cpu())
+        per_video_scores.append(torch.cat(frame_scores).mean().item())
 
     lpips_fn.cpu()
     torch.cuda.empty_cache()
-    return torch.stack(scores).mean().item()
+    mean_lpips = float(np.mean(per_video_scores))
+    std_lpips = float(np.std(per_video_scores))
+    print(f"  Per-video LPIPS: {mean_lpips:.4f} ± {std_lpips:.4f}")
+    return mean_lpips
 
 
 # =============================================================================
@@ -239,8 +258,7 @@ def load_single_view(views_dir, traj_dirs, view_idx, start_frame=0, num_frames=N
     sf = start_frame
     ef = sf + num_frames if num_frames else None
     real_list, pred_list = [], []
-    # print (len(traj_dirs))
-    for traj_dir in traj_dirs[:16]:
+    for traj_dir in traj_dirs:
         traj_path = os.path.join(views_dir, traj_dir)
         gt = np.load(os.path.join(traj_path, f"gt_view{view_idx}.npy"))[sf:ef]
         pred = np.load(os.path.join(traj_path, f"pred_view{view_idx}.npy"))[sf:ef]
@@ -366,7 +384,7 @@ def main():
                 "start_frame": args.start_frame,
                 "num_frames": args.num_frames,
                 "fvd_window": args.fvd_window,
-                "num_trajectories": len(real_videos[view_keys[0]]),
+                "num_trajectories": len(traj_dirs),
             },
             "metrics": {k: float(v) for k, v in metrics.items()},
         }, f, indent=2)
