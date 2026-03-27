@@ -417,7 +417,8 @@ if __name__ == "__main__":
             # videos_dir = args.val_model_path.split('/')[:-1]
             # videos_dir = '/'.join(videos_dir)
             # uuid = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            args.save_dir = '/scratch/jarnav/SAILOR/DROID/ctrl-world-pred'
+            # args.save_dir = '/scratch/jarnav/SAILOR/DROID/ctrl-world-pred'
+            args.save_dir = ''
             filename_video = f"{args.save_dir}/{val_id_i}.mp4"
             os.makedirs(os.path.dirname(filename_video), exist_ok=True)
             mediapy.write_video(filename_video, video, fps=4)
