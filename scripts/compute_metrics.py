@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compute FID, FVD, LPIPS from saved per-view .npy files.
+Compute FID, FVD, LPIPS, PSNR, SSIM from saved per-view .npy files.
 
 Reads gt_view{0,1,2}.npy and pred_view{0,1,2}.npy from the views/ subdirectory
 of the output dir. Each .npy file is (T, H, W, 3) uint8.
@@ -139,50 +139,53 @@ def _save_frames_to_dir(images, dirpath):
         Image.fromarray(img).save(os.path.join(dirpath, f"{i:06d}.png"))
 
 
-def compute_fid(real_images, fake_images, batch_size=16, device='cuda'):
-    """Per-video FID using pytorch-fid, averaged across videos.
+def compute_fid_streaming(views_dir, traj_dirs, view_idx, start_frame=0, num_frames=None,
+                          batch_size=32, device='cuda'):
+    """FID using pytorch-fid, streaming one video at a time to avoid OOM.
 
-    Expects (B, T, C, H, W) input. Computes FID per video, returns mean.
+    Saves all frames as PNGs to temp dirs, then runs pytorch-fid.
     """
     from pytorch_fid import fid_score
 
-    assert real_images.ndim == 5 and fake_images.ndim == 5, \
-        "Expected 5D (B, T, C, H, W) tensors for per-video FID"
+    sf = start_frame
+    ef = sf + num_frames if num_frames else None
+    total_frames = 0
 
-    B = real_images.shape[0]
-    fid_scores = []
-    for b in range(B):
-        with tempfile.TemporaryDirectory() as real_dir, tempfile.TemporaryDirectory() as fake_dir:
-            _save_frames_to_dir(real_images[b], real_dir)
-            _save_frames_to_dir(fake_images[b], fake_dir)
-            fid = fid_score.calculate_fid_given_paths(
-                [real_dir, fake_dir],
-                batch_size=batch_size,
-                device=device,
-                dims=2048,
-            )
-        fid_scores.append(fid)
+    with tempfile.TemporaryDirectory() as real_dir, tempfile.TemporaryDirectory() as fake_dir:
+        for traj_dir in traj_dirs:
+            traj_path = os.path.join(views_dir, traj_dir)
+            gt = np.load(os.path.join(traj_path, f"gt_view{view_idx}.npy"))[sf:ef]
+            pred = np.load(os.path.join(traj_path, f"pred_view{view_idx}.npy"))[sf:ef]
+            for i in range(len(gt)):
+                idx = total_frames + i
+                Image.fromarray(gt[i]).save(os.path.join(real_dir, f"{idx:06d}.png"))
+                Image.fromarray(pred[i]).save(os.path.join(fake_dir, f"{idx:06d}.png"))
+            total_frames += len(gt)
+
+        print(f"  FID: {total_frames} frames saved, computing...")
+        fid = fid_score.calculate_fid_given_paths(
+            [real_dir, fake_dir],
+            batch_size=batch_size,
+            device=device,
+            dims=2048,
+        )
     torch.cuda.empty_cache()
-    mean_fid = float(np.mean(fid_scores))
-    std_fid = float(np.std(fid_scores))
-    print(f"  Per-video FID: {mean_fid:.2f} ± {std_fid:.2f}")
-    return mean_fid
+    return fid
 
 
 @torch.no_grad()
-def compute_fvd(real_videos, fake_videos, batch_size=16, device='cuda',
-                window_size=15, stride=8):
-    """FVD using I3D features with sliding windows (default 15 frames to match IRASim)."""
+def compute_fvd(real_videos, fake_videos, batch_size=16, device='cuda'):
+    """FVD using I3D features. One clip per video (no sliding windows).
+
+    Expects (N, T, C, H, W) input. Each video is one clip passed to I3D.
+    """
     if real_videos.ndim == 5 and real_videos.shape[1] != 3:
         real_videos = real_videos.permute(0, 2, 1, 3, 4)
     if fake_videos.ndim == 5 and fake_videos.shape[1] != 3:
         fake_videos = fake_videos.permute(0, 2, 1, 3, 4)
 
     feature_extractor = I3DFeatures().to(device).eval()
-    real_clips = _sliding_window_clips(real_videos, window_size, stride)
-    fake_clips = _sliding_window_clips(fake_videos, window_size, stride)
-    print(f"  FVD: {len(real_clips)} real clips, {len(fake_clips)} fake clips "
-          f"(window={window_size}, stride={stride})")
+    print(f"  FVD: {len(real_videos)} real clips, {len(fake_videos)} fake clips")
 
     def extract_features(clips):
         features = []
@@ -191,8 +194,8 @@ def compute_fvd(real_videos, fake_videos, batch_size=16, device='cuda',
             features.append(feature_extractor(batch).cpu().numpy())
         return np.concatenate(features, axis=0)
 
-    real_features = extract_features(real_clips)
-    fake_features = extract_features(fake_clips)
+    real_features = extract_features(real_videos)
+    fake_features = extract_features(fake_videos)
     mu_r, sigma_r = compute_statistics(real_features)
     mu_f, sigma_f = compute_statistics(fake_features)
     fvd = calculate_frechet_distance(mu_r, sigma_r, mu_f, sigma_f)
@@ -203,33 +206,141 @@ def compute_fvd(real_videos, fake_videos, batch_size=16, device='cuda',
 
 
 @torch.no_grad()
-def compute_lpips(real_images, fake_images, batch_size=256, device='cuda'):
-    """Per-video LPIPS using VGG, averaged across videos.
+def compute_lpips_streaming(views_dir, traj_dirs, view_idx, start_frame=0, num_frames=None,
+                            batch_size=64, device='cuda'):
+    """LPIPS using VGG, computed in streaming fashion (one video at a time).
 
-    Expects (B, T, C, H, W) input. Averages LPIPS per video, then across videos.
+    Loads each video's frames on the fly to avoid OOM.
+    Returns mean LPIPS across all frame pairs from all videos.
     """
     import lpips
     lpips_fn = lpips.LPIPS(net='vgg').to(device).eval()
 
-    assert real_images.ndim == 5 and fake_images.ndim == 5, \
-        "Expected 5D (B, T, C, H, W) tensors for per-video LPIPS"
+    sf = start_frame
+    ef = sf + num_frames if num_frames else None
+    total_score = 0.0
+    total_frames = 0
 
-    B, T = real_images.shape[:2]
-    per_video_scores = []
-    for b in range(B):
-        frame_scores = []
-        for i in range(0, T, batch_size):
-            r = real_images[b, i:i + batch_size].to(device) * 2 - 1
-            f = fake_images[b, i:i + batch_size].to(device) * 2 - 1
-            frame_scores.append(lpips_fn(r, f).cpu())
-        per_video_scores.append(torch.cat(frame_scores).mean().item())
+    for traj_dir in traj_dirs:
+        traj_path = os.path.join(views_dir, traj_dir)
+        gt = np.load(os.path.join(traj_path, f"gt_view{view_idx}.npy"))[sf:ef]
+        pred = np.load(os.path.join(traj_path, f"pred_view{view_idx}.npy"))[sf:ef]
+        real_t = torch.from_numpy(gt).float().permute(0, 3, 1, 2) / 255.0
+        pred_t = torch.from_numpy(pred).float().permute(0, 3, 1, 2) / 255.0
+        n = real_t.shape[0]
+
+        for i in range(0, n, batch_size):
+            r = real_t[i:i + batch_size].to(device) * 2 - 1
+            f = pred_t[i:i + batch_size].to(device) * 2 - 1
+            scores = lpips_fn(r, f)
+            total_score += scores.sum().item()
+            total_frames += scores.numel()
+
+        del real_t, pred_t
 
     lpips_fn.cpu()
     torch.cuda.empty_cache()
-    mean_lpips = float(np.mean(per_video_scores))
-    std_lpips = float(np.std(per_video_scores))
-    print(f"  Per-video LPIPS: {mean_lpips:.4f} ± {std_lpips:.4f}")
-    return mean_lpips
+    return total_score / total_frames
+
+
+@torch.no_grad()
+def compute_psnr_streaming(views_dir, traj_dirs, view_idx, start_frame=0, num_frames=None,
+                           batch_size=64, device='cuda'):
+    """PSNR computed in streaming fashion (one video at a time).
+
+    PSNR = 10 * log10(1 / MSE) for images in [0, 1].
+    Returns mean PSNR across all frame pairs from all videos.
+    """
+    sf = start_frame
+    ef = sf + num_frames if num_frames else None
+    total_psnr = 0.0
+    total_frames = 0
+
+    for traj_dir in traj_dirs:
+        traj_path = os.path.join(views_dir, traj_dir)
+        gt = np.load(os.path.join(traj_path, f"gt_view{view_idx}.npy"))[sf:ef]
+        pred = np.load(os.path.join(traj_path, f"pred_view{view_idx}.npy"))[sf:ef]
+        real_t = torch.from_numpy(gt).float().permute(0, 3, 1, 2) / 255.0
+        pred_t = torch.from_numpy(pred).float().permute(0, 3, 1, 2) / 255.0
+        n = real_t.shape[0]
+
+        for i in range(0, n, batch_size):
+            r = real_t[i:i + batch_size].to(device)
+            f = pred_t[i:i + batch_size].to(device)
+            mse = ((r - f) ** 2).mean(dim=(1, 2, 3))  # per-frame MSE
+            # Avoid log(0) for perfect frames
+            psnr = 10 * torch.log10(1.0 / mse.clamp(min=1e-10))
+            total_psnr += psnr.sum().item()
+            total_frames += psnr.numel()
+
+        del real_t, pred_t
+
+    torch.cuda.empty_cache()
+    return total_psnr / total_frames
+
+
+@torch.no_grad()
+def compute_ssim_streaming(views_dir, traj_dirs, view_idx, start_frame=0, num_frames=None,
+                           batch_size=16, device='cuda'):
+    """SSIM computed in streaming fashion (one video at a time).
+
+    Uses the standard SSIM formulation with 11x11 Gaussian window.
+    Returns mean SSIM across all frame pairs from all videos.
+    """
+    sf = start_frame
+    ef = sf + num_frames if num_frames else None
+    total_ssim = 0.0
+    total_frames = 0
+
+    # Build 11x11 Gaussian window
+    window_size = 11
+    sigma = 1.5
+    coords = torch.arange(window_size, dtype=torch.float32) - window_size // 2
+    g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+    g = g / g.sum()
+    window_1d = g.unsqueeze(1)
+    window_2d = window_1d @ window_1d.t()
+    window_2d = window_2d.unsqueeze(0).unsqueeze(0)  # (1, 1, 11, 11)
+    window = window_2d.expand(3, 1, -1, -1).contiguous().to(device)
+
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+    pad = window_size // 2
+
+    for traj_dir in traj_dirs:
+        traj_path = os.path.join(views_dir, traj_dir)
+        gt = np.load(os.path.join(traj_path, f"gt_view{view_idx}.npy"))[sf:ef]
+        pred = np.load(os.path.join(traj_path, f"pred_view{view_idx}.npy"))[sf:ef]
+        real_t = torch.from_numpy(gt).float().permute(0, 3, 1, 2) / 255.0
+        pred_t = torch.from_numpy(pred).float().permute(0, 3, 1, 2) / 255.0
+        n = real_t.shape[0]
+
+        for i in range(0, n, batch_size):
+            r = real_t[i:i + batch_size].to(device)
+            f = pred_t[i:i + batch_size].to(device)
+
+            mu_r = F.conv2d(r, window, padding=pad, groups=3)
+            mu_f = F.conv2d(f, window, padding=pad, groups=3)
+            mu_r_sq = mu_r ** 2
+            mu_f_sq = mu_f ** 2
+            mu_rf = mu_r * mu_f
+
+            sigma_r_sq = F.conv2d(r * r, window, padding=pad, groups=3) - mu_r_sq
+            sigma_f_sq = F.conv2d(f * f, window, padding=pad, groups=3) - mu_f_sq
+            sigma_rf = F.conv2d(r * f, window, padding=pad, groups=3) - mu_rf
+
+            ssim_map = ((2 * mu_rf + C1) * (2 * sigma_rf + C2)) / \
+                       ((mu_r_sq + mu_f_sq + C1) * (sigma_r_sq + sigma_f_sq + C2))
+
+            # Mean SSIM per frame, then sum
+            ssim_per_frame = ssim_map.mean(dim=(1, 2, 3))
+            total_ssim += ssim_per_frame.sum().item()
+            total_frames += ssim_per_frame.numel()
+
+        del real_t, pred_t
+
+    torch.cuda.empty_cache()
+    return total_ssim / total_frames
 
 
 # =============================================================================
@@ -254,7 +365,12 @@ def get_traj_dirs(views_dir, max_trajs=None):
 
 
 def load_single_view(views_dir, traj_dirs, view_idx, start_frame=0, num_frames=None):
-    """Load a single view across all trajectories. Returns stacked (N, T, C, H, W) tensors."""
+    """Load a single view across all trajectories.
+
+    Returns:
+        real_list: list of per-video tensors, each (T_i, C, H, W) in [0,1]
+        pred_list: list of per-video tensors, each (T_i, C, H, W) in [0,1]
+    """
     sf = start_frame
     ef = sf + num_frames if num_frames else None
     real_list, pred_list = [], []
@@ -264,12 +380,7 @@ def load_single_view(views_dir, traj_dirs, view_idx, start_frame=0, num_frames=N
         pred = np.load(os.path.join(traj_path, f"pred_view{view_idx}.npy"))[sf:ef]
         real_list.append(torch.from_numpy(gt).float().permute(0, 3, 1, 2) / 255.0)
         pred_list.append(torch.from_numpy(pred).float().permute(0, 3, 1, 2) / 255.0)
-    max_t = max(max(v.shape[0] for v in real_list), max(v.shape[0] for v in pred_list))
-    real_t = pad_and_stack(real_list, max_t).clamp(0, 1)
-    pred_t = pad_and_stack(pred_list, max_t).clamp(0, 1)
-    n_min = min(real_t.shape[0], pred_t.shape[0])
-    t_min = min(real_t.shape[1], pred_t.shape[1])
-    return real_t[:n_min, :t_min], pred_t[:n_min, :t_min]
+    return real_list, pred_list
 
 
 def pad_and_stack(vid_list, max_t):
@@ -304,6 +415,8 @@ def main():
     parser.add_argument('--skip_fvd', action='store_true', help="Skip FVD computation")
     parser.add_argument('--skip_fid', action='store_true', help="Skip FID computation")
     parser.add_argument('--skip_lpips', action='store_true', help="Skip LPIPS computation")
+    parser.add_argument('--skip_psnr', action='store_true', help="Skip PSNR computation")
+    parser.add_argument('--skip_ssim', action='store_true', help="Skip SSIM computation")
     parser.add_argument('--output', type=str, default=None,
                         help="Path to save metrics JSON (default: <views_dir>/../metrics.json)")
     args = parser.parse_args()
@@ -327,40 +440,71 @@ def main():
     for vi, key in enumerate(view_keys):
         print(f"\n{'='*60}")
         print(f"Loading view {vi}...")
-        real_t, pred_t = load_single_view(
-            args.views_dir, traj_dirs, vi,
-            start_frame=args.start_frame, num_frames=args.num_frames,
-        )
-        print(f"View '{key}': {real_t.shape}")
+        print(f"View '{key}': {len(traj_dirs)} videos")
         print(f"{'='*60}")
 
         if not args.skip_fvd:
-            print(f"  Computing FVD (window={args.fvd_window})...")
+            assert args.num_frames is not None, "FVD requires --num_frames to fix video length"
+            real_list, pred_list = load_single_view(
+                args.views_dir, traj_dirs, vi,
+                start_frame=args.start_frame, num_frames=args.num_frames,
+            )
+            print(f"  Computing FVD ({args.num_frames} frames per clip)...")
+            # Pad all videos to num_frames (fixed length)
+            real_stacked = pad_and_stack(real_list, args.num_frames)
+            pred_stacked = pad_and_stack(pred_list, args.num_frames)
             metrics[f"fvd_{key}"] = compute_fvd(
-                real_t, pred_t, batch_size=8, device=device,
-                window_size=args.fvd_window, stride=args.fvd_stride,
+                real_stacked, pred_stacked, batch_size=8, device=device,
             )
             print(f"  FVD: {metrics[f'fvd_{key}']:.2f}")
+            del real_list, pred_list, real_stacked, pred_stacked
             torch.cuda.empty_cache()
             gc.collect()
 
         if not args.skip_fid:
-            print(f"  Computing FID...")
-            metrics[f"fid_{key}"] = compute_fid(real_t, pred_t, batch_size=8, device=device)
+            print(f"  Computing FID (streaming)...")
+            metrics[f"fid_{key}"] = compute_fid_streaming(
+                args.views_dir, traj_dirs, vi,
+                start_frame=args.start_frame, num_frames=args.num_frames,
+                batch_size=32, device=device,
+            )
             print(f"  FID: {metrics[f'fid_{key}']:.2f}")
             torch.cuda.empty_cache()
             gc.collect()
 
+        # LPIPS streams one video at a time — no bulk loading needed
         if not args.skip_lpips:
-            print(f"  Computing LPIPS...")
-            metrics[f"lpips_{key}"] = compute_lpips(real_t, pred_t, batch_size=64, device=device)
+            print(f"  Computing LPIPS (streaming)...")
+            metrics[f"lpips_{key}"] = compute_lpips_streaming(
+                args.views_dir, traj_dirs, vi,
+                start_frame=args.start_frame, num_frames=args.num_frames,
+                batch_size=64, device=device,
+            )
             print(f"  LPIPS: {metrics[f'lpips_{key}']:.4f}")
             torch.cuda.empty_cache()
             gc.collect()
 
-        # Free view data before loading next
-        del real_t, pred_t
-        gc.collect()
+        if not args.skip_psnr:
+            print(f"  Computing PSNR (streaming)...")
+            metrics[f"psnr_{key}"] = compute_psnr_streaming(
+                args.views_dir, traj_dirs, vi,
+                start_frame=args.start_frame, num_frames=args.num_frames,
+                batch_size=64, device=device,
+            )
+            print(f"  PSNR: {metrics[f'psnr_{key}']:.2f}")
+            torch.cuda.empty_cache()
+            gc.collect()
+
+        if not args.skip_ssim:
+            print(f"  Computing SSIM (streaming)...")
+            metrics[f"ssim_{key}"] = compute_ssim_streaming(
+                args.views_dir, traj_dirs, vi,
+                start_frame=args.start_frame, num_frames=args.num_frames,
+                batch_size=16, device=device,
+            )
+            print(f"  SSIM: {metrics[f'ssim_{key}']:.4f}")
+            torch.cuda.empty_cache()
+            gc.collect()
 
     # Print summary
     print(f"\n{'='*60}")
@@ -368,10 +512,10 @@ def main():
     print(f"{'='*60}")
     for key in view_keys:
         print(f"\n  {key}:")
-        for metric_name in ['fid', 'fvd', 'lpips']:
+        for metric_name in ['fid', 'fvd', 'lpips', 'psnr', 'ssim']:
             mk = f"{metric_name}_{key}"
             if mk in metrics:
-                fmt = '.4f' if metric_name == 'lpips' else '.2f'
+                fmt = '.4f' if metric_name in ('lpips', 'ssim') else '.2f'
                 print(f"    {metric_name:8s} {metrics[mk]:{fmt}}")
     print(f"{'='*60}")
 

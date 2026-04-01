@@ -422,7 +422,9 @@ class CtrlWorldAgent:
                     latents.append(latent)
                 video_latent.append(torch.cat(latents, dim=0))
 
-        return car_action, joint_pos, video_dict, video_latent, instruction, cut_interaction_num, length
+        # Trajectory length from start_idx onward (in skipped-frame space)
+        effective_length = len(frames_ids)
+        return car_action, joint_pos, video_dict, video_latent, instruction, cut_interaction_num, effective_length
 
     def forward_wm(self, action_cond, video_latent_true, video_latent_cond, his_cond=None, text=None):
         """Run world model forward pass and decode predictions."""
