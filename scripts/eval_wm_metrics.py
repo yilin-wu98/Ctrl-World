@@ -635,6 +635,8 @@ def parse_args():
                         help="Number of dataloader workers")
     parser.add_argument('--max_trajs', type=int, default=None,
                         help="Maximum number of trajectories to evaluate (limits both dataloader and replay modes)")
+    parser.add_argument('--no_text', action='store_true',
+                        help="Disable text conditioning (pass blank text to the model)")
 
     return parser.parse_args()
 
@@ -973,6 +975,10 @@ def main():
     for k, v in cli_args.__dict__.items():
         if v is not None:
             model_args.__dict__[k] = v
+
+    # Override text conditioning if --no_text is set
+    if cli_args.no_text:
+        model_args.text_cond = False
 
     # ---- Dataloader mode (single-step predictions via Dataset_mix) ----
     if cli_args.use_dataloader:
